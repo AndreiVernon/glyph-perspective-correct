@@ -49,81 +49,162 @@ def main():
 
     # 3. Detect the markers
     corners, ids, rejected = detector.detectMarkers(gray)
+    num_markers = 0 if ids is None else len(ids)
 
-    if ids is None or len(ids) < 4:
-        print(f"Error: Found {0 if ids is None else len(ids)} markers. Exactly 4 are required.")
+    if num_markers not in [1, 2, 4]:
+        print(f"Error: Found {num_markers} markers. Exactly 1, 2, or 4 are required.")
         if ids is not None:
             cv2.aruco.drawDetectedMarkers(image, corners, ids)
             cv2.imshow("Found Markers", image)
             cv2.waitKey(0)
         return
 
-    # 4. Extract the center points and their corresponding IDs
-    centers = []
-    detected_ids = []
-    
-    # Flatten ids to handle different OpenCV version return shapes safely
-    flat_ids = ids.flatten() 
-    
-    for i in range(4):
-        marker_id = flat_ids[i]
-        marker_corners = corners[i][0]
-        cX = np.mean(marker_corners[:, 0])
-        cY = np.mean(marker_corners[:, 1])
-        centers.append([cX, cY])
-        detected_ids.append(marker_id)
+    print(f"Running in {num_markers}-glyph mode...")
+    flat_ids = ids.flatten()
 
-    centers = np.array(centers, dtype="float32")
-    
-    # 5. Order the centers (Top-Left, Top-Right, Bottom-Right, Bottom-Left)
-    if args.aruco_order:
-        # Sort by marker ID ascending
-        sorted_pairs = sorted(zip(detected_ids, centers), key=lambda x: x[0])
-        ordered_centers = np.array([pair[1] for pair in sorted_pairs], dtype="float32")
-    else:
-        # Fallback to geometric sorting
-        ordered_centers = order_points(centers)
+    if num_markers == 4:
+        # --- 4-GLYPH MODE: Crop to the 4 corners ---
+        centers = []
+        detected_ids = []
         
-    (tl, tr, br, bl) = ordered_centers
+        for i in range(4):
+            marker_id = flat_ids[i]
+            marker_corners = corners[i][0]
+            cX = np.mean(marker_corners[:, 0])
+            cY = np.mean(marker_corners[:, 1])
+            centers.append([cX, cY])
+            detected_ids.append(marker_id)
 
-    # --- Calculate True Aspect Ratio and Fit to Maximum Bounds ---
-    # Compute the width of the new image (max distance between top-right/top-left and bottom-right/bottom-left)
-    width_top = np.sqrt(((tr[0] - tl[0]) ** 2) + ((tr[1] - tl[1]) ** 2))
-    width_bottom = np.sqrt(((br[0] - bl[0]) ** 2) + ((br[1] - bl[1]) ** 2))
-    target_width = max(int(width_top), int(width_bottom))
+        centers = np.array(centers, dtype="float32")
+        
+        if args.aruco_order:
+            sorted_pairs = sorted(zip(detected_ids, centers), key=lambda x: x[0])
+            ordered_centers = np.array([pair[1] for pair in sorted_pairs], dtype="float32")
+        else:
+            ordered_centers = order_points(centers)
+            
+        (tl, tr, br, bl) = ordered_centers
 
-    # Compute the height of the new image (max distance between top-right/bottom-right and top-left/bottom-left)
-    height_right = np.sqrt(((tr[0] - br[0]) ** 2) + ((tr[1] - br[1]) ** 2))
-    height_left = np.sqrt(((tl[0] - bl[0]) ** 2) + ((tl[1] - bl[1]) ** 2))
-    target_height = max(int(height_right), int(height_left))
+        width_top = np.sqrt(((tr[0] - tl[0]) ** 2) + ((tr[1] - tl[1]) ** 2))
+        width_bottom = np.sqrt(((br[0] - bl[0]) ** 2) + ((br[1] - bl[1]) ** 2))
+        target_width = max(int(width_top), int(width_bottom))
 
-    # Scale to fit inside max bounds while maintaining aspect ratio
-    scale_w = args.max_width / target_width
-    scale_h = args.max_height / target_height
-    scale = min(scale_w, scale_h)  # Choose the limiting scale factor
+        height_right = np.sqrt(((tr[0] - br[0]) ** 2) + ((tr[1] - br[1]) ** 2))
+        height_left = np.sqrt(((tl[0] - bl[0]) ** 2) + ((tl[1] - bl[1]) ** 2))
+        target_height = max(int(height_right), int(height_left))
 
-    out_width = int(target_width * scale)
-    out_height = int(target_height * scale)
+        scale_w = args.max_width / target_width
+        scale_h = args.max_height / target_height
+        scale = min(scale_w, scale_h)
 
-    # 6. Define the destination points for the flattened whiteboard
-    dst_points = np.array([
-        [0, 0],
-        [out_width - 1, 0],
-        [out_width - 1, out_height - 1],
-        [0, out_height - 1]
-    ], dtype="float32")
+        out_width = int(target_width * scale)
+        out_height = int(target_height * scale)
 
-    # 7. Compute the homography matrix and warp
-    H, status = cv2.findHomography(ordered_centers, dst_points)
-    warped = cv2.warpPerspective(image, H, (out_width, out_height))
+        dst_points = np.array([
+            [0, 0],
+            [out_width - 1, 0],
+            [out_width - 1, out_height - 1],
+            [0, out_height - 1]
+        ], dtype="float32")
 
-    # --- Visualization ---
-    cv2.aruco.drawDetectedMarkers(image, corners, ids)
-    for pt in ordered_centers:
-        cv2.circle(image, (int(pt[0]), int(pt[1])), 10, (0, 255, 0), -1)
+        H, status = cv2.findHomography(ordered_centers, dst_points)
+        warped = cv2.warpPerspective(image, H, (out_width, out_height))
+
+        cv2.aruco.drawDetectedMarkers(image, corners, ids)
+        for pt in ordered_centers:
+            cv2.circle(image, (int(pt[0]), int(pt[1])), 10, (0, 255, 0), -1)
+
+    elif num_markers == 2:
+        # --- 2-GLYPH MODE: Average perspective, crop to rectangle defined by centers ---
+        m1_corners = corners[0][0]
+        m2_corners = corners[1][0]
+        m1_center = np.mean(m1_corners, axis=0)
+        m2_center = np.mean(m2_corners, axis=0)
+
+        # Average the corner vectors to create a "virtual" shared marker for perspective
+        offsets1 = m1_corners - m1_center
+        offsets2 = m2_corners - m2_center
+        avg_offsets = (offsets1 + offsets2) / 2.0
+        virtual_corners = ((m1_center + m2_center) / 2.0) + avg_offsets
+
+        # Temporarily map perspective to an arbitrary square
+        S = 100.0
+        dst_marker_pts = np.array([[0, 0], [S, 0], [S, S], [0, S]], dtype="float32")
+        H_temp, _ = cv2.findHomography(virtual_corners, dst_marker_pts)
+
+        # Transform the two marker centers to determine the crop bounds
+        centers_to_transform = np.array([m1_center, m2_center], dtype="float32").reshape(-1, 1, 2)
+        transformed_centers = cv2.perspectiveTransform(centers_to_transform, H_temp).squeeze()
+
+        c1_t, c2_t = transformed_centers
+        min_x = min(c1_t[0], c2_t[0])
+        max_x = max(c1_t[0], c2_t[0])
+        min_y = min(c1_t[1], c2_t[1])
+        max_y = max(c1_t[1], c2_t[1])
+
+        target_width = max_x - min_x
+        target_height = max_y - min_y
+
+        if target_width < 1 or target_height < 1:
+            print("Error: The two markers are perfectly aligned vertically or horizontally; cannot form a cropping rectangle.")
+            return
+
+        scale_w = args.max_width / target_width
+        scale_h = args.max_height / target_height
+        scale = min(scale_w, scale_h)
+
+        out_width = int(target_width * scale)
+        out_height = int(target_height * scale)
+
+        # Offset the destination points so the bounding box origin maps to (0,0) and is properly scaled
+        dst_marker_pts_adjusted = (dst_marker_pts - np.array([min_x, min_y], dtype="float32")) * scale
+        
+        H, _ = cv2.findHomography(virtual_corners, dst_marker_pts_adjusted)
+        warped = cv2.warpPerspective(image, H, (out_width, out_height))
+
+        cv2.aruco.drawDetectedMarkers(image, corners, ids)
+        cv2.circle(image, (int(m1_center[0]), int(m1_center[1])), 10, (0, 0, 255), -1)
+        cv2.circle(image, (int(m2_center[0]), int(m2_center[1])), 10, (0, 0, 255), -1)
+
+    elif num_markers == 1:
+        # --- 1-GLYPH MODE: Correct perspective, do not crop ---
+        m_corners = corners[0][0]
+        
+        S = 100.0
+        dst_marker_pts = np.array([[0, 0], [S, 0], [S, S], [0, S]], dtype="float32")
+        H_temp, _ = cv2.findHomography(m_corners, dst_marker_pts)
+
+        # Map the 4 corners of the *original image* to find the new bounding box
+        h_orig, w_orig = image.shape[:2]
+        img_corners = np.array([
+            [0, 0], [w_orig - 1, 0], [w_orig - 1, h_orig - 1], [0, h_orig - 1]
+        ], dtype="float32").reshape(-1, 1, 2)
+        transformed_img_corners = cv2.perspectiveTransform(img_corners, H_temp).squeeze()
+
+        min_x = np.min(transformed_img_corners[:, 0])
+        max_x = np.max(transformed_img_corners[:, 0])
+        min_y = np.min(transformed_img_corners[:, 1])
+        max_y = np.max(transformed_img_corners[:, 1])
+
+        target_width = max_x - min_x
+        target_height = max_y - min_y
+
+        scale_w = args.max_width / target_width
+        scale_h = args.max_height / target_height
+        scale = min(scale_w, scale_h)
+
+        out_width = int(target_width * scale)
+        out_height = int(target_height * scale)
+
+        # Shift the destination marker coordinates so nothing gets cropped out of the negative bounds
+        dst_marker_pts_adjusted = (dst_marker_pts - np.array([min_x, min_y], dtype="float32")) * scale
+        
+        H, _ = cv2.findHomography(m_corners, dst_marker_pts_adjusted)
+        warped = cv2.warpPerspective(image, H, (out_width, out_height))
+
+        cv2.aruco.drawDetectedMarkers(image, corners, ids)
 
     print(f"Output resolution: {out_width}x{out_height}")
-    print(f"Sorting method: {'ArUco IDs' if args.aruco_order else 'Geometric (Euclidean)'}")
 
     # 1. Open Window 1 for the original image
     viewer1 = napari.Viewer(title="Detected Markers")
@@ -133,7 +214,7 @@ def main():
     viewer2 = napari.Viewer(title="Corrected Whiteboard")
     viewer2.add_image(warped, rgb=True)
 
-    # 4. Start the event loop (replaces cv2.waitKey)
+    # 3. Start the event loop
     print("Close the viewers to exit...")
     napari.run()
 
