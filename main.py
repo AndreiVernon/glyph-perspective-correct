@@ -262,14 +262,28 @@ def main():
             
         print(f"Output resolution: {warped.shape[1]}x{warped.shape[0]}")
 
-        viewer1 = napari.Viewer(title="Detected Markers")
-        viewer1.add_image(annotated, rgb=True)
+        h, w = annotated.shape[:2]
+        scale_w = args.max_width / w
+        scale_h = args.max_height / h
+        scale = min(scale_w, scale_h)
+        if scale > 1.0:
+            scale = 1.0
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+        annotated_resized = cv2.resize(annotated, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
 
-        viewer2 = napari.Viewer(title="Corrected Whiteboard")
-        viewer2.add_image(warped, rgb=True)
+        # viewer1 = napari.Viewer(title="Detected Markers")
+        # viewer1.add_image(annotated, rgb=True)
+        # viewer2 = napari.Viewer(title="Corrected Whiteboard")
+        # viewer2.add_image(warped, rgb=True)
+        # print("Close the viewers to exit...")
+        # napari.run()
 
-        print("Close the viewers to exit...")
-        napari.run()
+        cv2.imshow("Detected Markers", annotated_resized)
+        cv2.imshow("Corrected Whiteboard", warped)
+        print("Press any key to exit...")
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     main()
