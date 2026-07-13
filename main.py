@@ -36,7 +36,7 @@ def process_image(image, detector, args):
     corners, ids, rejected = detector.detectMarkers(gray)
     num_markers = 0 if ids is None else len(ids)
 
-    if num_markers not in [1, 2, 4]:
+    if num_markers not in [1, 2, 4] or (args.strict and num_markers != 4):
         if ids is not None:
             cv2.aruco.drawDetectedMarkers(annotated, corners, ids)
         return None, annotated, False
@@ -188,6 +188,7 @@ def main():
     parser.add_argument("-i", "--input", help="Path to the input image (used for static mode)")
     parser.add_argument("-c", "--camera", type=int, default=-1, help="Webcam device index (e.g., 0). Overrides input image if provided.")
     parser.add_argument("-p", "--pause-on-fail", action="store_true", help="Pause the camera if correction fails.")
+    parser.add_argument("-s", "--strict", action="store_true", help="Only count four-corner detections as success")
     parser.add_argument("-w", "--max-width", type=int, default=1920, help="Maximum width of the output image")
     parser.add_argument("-t", "--max-height", type=int, default=1080, help="Maximum height of the output image")
     parser.add_argument("-ao", "--aruco-order", action="store_true", help="Sort corners using ArUco IDs (Lowest ID = TL, 2nd = TR, 3rd = BR, Highest = BL)")
