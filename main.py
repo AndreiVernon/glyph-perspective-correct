@@ -25,41 +25,22 @@ def order_points(pts: np.ndarray):
     
     return ordered_rect
 
-def main():
-    parser = argparse.ArgumentParser(description="Whiteboard perspective correction using ArUco markers.")
-    parser.add_argument("-i", "--input", required=True, help="Path to the input image")
-    parser.add_argument("-w", "--max-width", type=int, default=1920, help="Maximum width of the output image")
-    parser.add_argument("-t", "--max-height", type=int, default=1080, help="Maximum height of the output image")
-    parser.add_argument("-ao", "--aruco-order", action="store_true", help="Sort corners using ArUco IDs (Lowest ID = TL, 2nd = TR, 3rd = BR, Highest = BL)")
-    args = parser.parse_args()
-
-    # 1. Load the image
-    image = cv2.imread(args.input)
-    if image is None:
-        print(f"Error: Could not load image from {args.input}")
-        return
-
-    # Convert to grayscale for detection
+def process_image(image, detector, args):
+    """
+    Processes a single frame.
+    Returns: (warped_image, annotated_image, success_boolean)
+    """
+    annotated = image.copy()
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-
-    # 2. Configure the ArUco detector
-    aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
-    parameters = cv2.aruco.DetectorParameters()
-    detector = cv2.aruco.ArucoDetector(aruco_dict, parameters)
-
-    # 3. Detect the markers
+    
     corners, ids, rejected = detector.detectMarkers(gray)
     num_markers = 0 if ids is None else len(ids)
 
     if num_markers not in [1, 2, 4]:
-        print(f"Error: Found {num_markers} markers. Exactly 1, 2, or 4 are required.")
         if ids is not None:
-            cv2.aruco.drawDetectedMarkers(image, corners, ids)
-            cv2.imshow("Found Markers", image)
-            cv2.waitKey(0)
-        return
+            cv2.aruco.drawDetectedMarkers(annotated, corners, ids)
+        return None, annotated, False
 
-    print(f"Running in {num_markers}-glyph mode...")
     flat_ids = ids.flatten()
 
     if num_markers == 4:
@@ -110,9 +91,11 @@ def main():
         H, status = cv2.findHomography(ordered_centers, dst_points)
         warped = cv2.warpPerspective(image, H, (out_width, out_height))
 
-        cv2.aruco.drawDetectedMarkers(image, corners, ids)
+        cv2.aruco.drawDetectedMarkers(annotated, corners, ids)
         for pt in ordered_centers:
-            cv2.circle(image, (int(pt[0]), int(pt[1])), 10, (0, 255, 0), -1)
+            cv2.circle(annotated, (int(pt[0]), int(pt[1])), 10, (0, 255, 0), -1)
+
+        return warped, annotated, True
 
     elif num_markers == 2:
         # --- 2-GLYPH MODE: Average perspective, crop to rectangle defined by centers ---
@@ -121,33 +104,28 @@ def main():
         m1_center = np.mean(m1_corners, axis=0)
         m2_center = np.mean(m2_corners, axis=0)
 
-        # Average the corner vectors to create a "virtual" shared marker for perspective
         offsets1 = m1_corners - m1_center
         offsets2 = m2_corners - m2_center
         avg_offsets = (offsets1 + offsets2) / 2.0
         virtual_corners = ((m1_center + m2_center) / 2.0) + avg_offsets
 
-        # Temporarily map perspective to an arbitrary square
         S = 100.0
         dst_marker_pts = np.array([[0, 0], [S, 0], [S, S], [0, S]], dtype="float32")
         H_temp, _ = cv2.findHomography(virtual_corners, dst_marker_pts)
 
-        # Transform the two marker centers to determine the crop bounds
         centers_to_transform = np.array([m1_center, m2_center], dtype="float32").reshape(-1, 1, 2)
         transformed_centers = cv2.perspectiveTransform(centers_to_transform, H_temp).squeeze()
 
         c1_t, c2_t = transformed_centers
-        min_x = min(c1_t[0], c2_t[0])
-        max_x = max(c1_t[0], c2_t[0])
-        min_y = min(c1_t[1], c2_t[1])
-        max_y = max(c1_t[1], c2_t[1])
+        min_x, max_x = min(c1_t[0], c2_t[0]), max(c1_t[0], c2_t[0])
+        min_y, max_y = min(c1_t[1], c2_t[1]), max(c1_t[1], c2_t[1])
 
         target_width = max_x - min_x
         target_height = max_y - min_y
 
         if target_width < 1 or target_height < 1:
-            print("Error: The two markers are perfectly aligned vertically or horizontally; cannot form a cropping rectangle.")
-            return
+            cv2.aruco.drawDetectedMarkers(annotated, corners, ids)
+            return None, annotated, False
 
         scale_w = args.max_width / target_width
         scale_h = args.max_height / target_height
@@ -156,15 +134,16 @@ def main():
         out_width = int(target_width * scale)
         out_height = int(target_height * scale)
 
-        # Offset the destination points so the bounding box origin maps to (0,0) and is properly scaled
         dst_marker_pts_adjusted = (dst_marker_pts - np.array([min_x, min_y], dtype="float32")) * scale
         
         H, _ = cv2.findHomography(virtual_corners, dst_marker_pts_adjusted)
         warped = cv2.warpPerspective(image, H, (out_width, out_height))
 
-        cv2.aruco.drawDetectedMarkers(image, corners, ids)
-        cv2.circle(image, (int(m1_center[0]), int(m1_center[1])), 10, (0, 0, 255), -1)
-        cv2.circle(image, (int(m2_center[0]), int(m2_center[1])), 10, (0, 0, 255), -1)
+        cv2.aruco.drawDetectedMarkers(annotated, corners, ids)
+        cv2.circle(annotated, (int(m1_center[0]), int(m1_center[1])), 10, (0, 0, 255), -1)
+        cv2.circle(annotated, (int(m2_center[0]), int(m2_center[1])), 10, (0, 0, 255), -1)
+
+        return warped, annotated, True
 
     elif num_markers == 1:
         # --- 1-GLYPH MODE: Correct perspective, do not crop ---
@@ -174,7 +153,6 @@ def main():
         dst_marker_pts = np.array([[0, 0], [S, 0], [S, S], [0, S]], dtype="float32")
         H_temp, _ = cv2.findHomography(m_corners, dst_marker_pts)
 
-        # Map the 4 corners of the *original image* to find the new bounding box
         h_orig, w_orig = image.shape[:2]
         img_corners = np.array([
             [0, 0], [w_orig - 1, 0], [w_orig - 1, h_orig - 1], [0, h_orig - 1]
@@ -196,27 +174,101 @@ def main():
         out_width = int(target_width * scale)
         out_height = int(target_height * scale)
 
-        # Shift the destination marker coordinates so nothing gets cropped out of the negative bounds
         dst_marker_pts_adjusted = (dst_marker_pts - np.array([min_x, min_y], dtype="float32")) * scale
         
         H, _ = cv2.findHomography(m_corners, dst_marker_pts_adjusted)
         warped = cv2.warpPerspective(image, H, (out_width, out_height))
 
-        cv2.aruco.drawDetectedMarkers(image, corners, ids)
+        cv2.aruco.drawDetectedMarkers(annotated, corners, ids)
 
-    print(f"Output resolution: {out_width}x{out_height}")
+        return warped, annotated, True
 
-    # 1. Open Window 1 for the original image
-    viewer1 = napari.Viewer(title="Detected Markers")
-    viewer1.add_image(image, rgb=True)
+def main():
+    parser = argparse.ArgumentParser(description="Whiteboard perspective correction using ArUco markers.")
+    parser.add_argument("-i", "--input", help="Path to the input image (used for static mode)")
+    parser.add_argument("-c", "--camera", type=int, default=-1, help="Webcam device index (e.g., 0). Overrides input image if provided.")
+    parser.add_argument("-p", "--pause-on-fail", action="store_true", help="Pause the camera if correction fails.")
+    parser.add_argument("-w", "--max-width", type=int, default=1920, help="Maximum width of the output image")
+    parser.add_argument("-t", "--max-height", type=int, default=1080, help="Maximum height of the output image")
+    parser.add_argument("-ao", "--aruco-order", action="store_true", help="Sort corners using ArUco IDs (Lowest ID = TL, 2nd = TR, 3rd = BR, Highest = BL)")
+    args = parser.parse_args()
 
-    # 2. Open Window 2 for the warped image
-    viewer2 = napari.Viewer(title="Corrected Whiteboard")
-    viewer2.add_image(warped, rgb=True)
+    if args.input is None and args.camera < 0:
+        parser.error("You must provide either an input image (-i) or a camera index (-c).")
 
-    # 3. Start the event loop
-    print("Close the viewers to exit...")
-    napari.run()
+    # Configure the ArUco detector
+    aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+    parameters = cv2.aruco.DetectorParameters()
+    detector = cv2.aruco.ArucoDetector(aruco_dict, parameters)
+
+    if args.camera >= 0:
+        # --- WEBCAM MODE ---
+        cap = cv2.VideoCapture(args.camera)
+        if not cap.isOpened():
+            print(f"Error: Could not open camera {args.camera}")
+            return
+            
+        last_good = None
+        print("Starting webcam mode. Press 'ESC' or 'q' to exit.")
+        
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                print("Failed to grab frame.")
+                break
+
+            warped, annotated, success = process_image(frame, detector, args)
+
+            if success:
+                last_good = warped.copy()
+                display_img = warped
+            else:
+                if not args.pause_on_fail:
+                    display_img = frame
+                if last_good is not None:
+                    display_img = last_good.copy()
+                    # Draw a 10x10 red square so it is visible on standard resolutions
+                    cv2.rectangle(display_img, (0, 0), (10, 10), (0, 0, 255), -1)
+                else:
+                    display_img = np.zeros((480, 640, 3), dtype=np.uint8)
+                    cv2.putText(display_img, "Waiting for markers...", (50, 240), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+
+            cv2.imshow("Detected Markers (Webcam)", annotated)
+            cv2.imshow("Corrected Whiteboard", display_img)
+
+            key = cv2.waitKey(1) & 0xFF
+            if key in [27, ord('q')]:  # ESC or q
+                break
+
+        cap.release()
+        cv2.destroyAllWindows()
+
+    else:
+        # --- STATIC IMAGE MODE ---
+        image = cv2.imread(args.input)
+        if image is None:
+            print(f"Error: Could not load image from {args.input}")
+            return
+
+        warped, annotated, success = process_image(image, detector, args)
+
+        if not success:
+            print("Error: Could not find exactly 1, 2, or 4 markers.")
+            cv2.imshow("Found Markers", annotated)
+            cv2.waitKey(0)
+            return
+            
+        print(f"Output resolution: {warped.shape[1]}x{warped.shape[0]}")
+
+        viewer1 = napari.Viewer(title="Detected Markers")
+        viewer1.add_image(annotated, rgb=True)
+
+        viewer2 = napari.Viewer(title="Corrected Whiteboard")
+        viewer2.add_image(warped, rgb=True)
+
+        print("Close the viewers to exit...")
+        napari.run()
 
 if __name__ == "__main__":
     main()
