@@ -16,14 +16,14 @@ def order_points(pts: np.ndarray):
     sorted_pts = pts[sorted_indices]
     
     # 4. Calculate Euclidean distance to the image origin (0,0) to find the Top-Left point.
-    # This is far more robust to severe perspective distortion than the x+y sum.
     dists = np.linalg.norm(sorted_pts, axis=1)
     tl_index = np.argmin(dists)
     
-    # 5. Shift the array circularly so the Top-Left point is first.
+    # 5. Shift the arrays circularly so the Top-Left point is first.
     ordered_rect = np.roll(sorted_pts, -tl_index, axis=0)
+    ordered_indices = np.roll(sorted_indices, -tl_index, axis=0)
     
-    return ordered_rect
+    return ordered_rect, ordered_indices
 
 def process_image(image, detector, args):
     """
@@ -44,9 +44,10 @@ def process_image(image, detector, args):
     flat_ids = ids.flatten()
 
     if num_markers == 4:
-        # --- 4-GLYPH MODE: Crop to the 4 corners ---
+        # --- 4-GLYPH MODE: Crop to the 4 outer corners ---
         centers = []
         detected_ids = []
+        marker_corners_list = []
         
         for i in range(4):
             marker_id = flat_ids[i]
@@ -55,16 +56,33 @@ def process_image(image, detector, args):
             cY = np.mean(marker_corners[:, 1])
             centers.append([cX, cY])
             detected_ids.append(marker_id)
+            marker_corners_list.append(marker_corners)
 
         centers = np.array(centers, dtype="float32")
         
         if args.aruco_order:
-            sorted_pairs = sorted(zip(detected_ids, centers), key=lambda x: x[0])
+            sorted_pairs = sorted(zip(detected_ids, centers, marker_corners_list), key=lambda x: x[0])
             ordered_centers = np.array([pair[1] for pair in sorted_pairs], dtype="float32")
+            ordered_corners_list = [pair[2] for pair in sorted_pairs]
         else:
-            ordered_centers = order_points(centers)
+            ordered_centers, ordered_indices = order_points(centers)
+            ordered_corners_list = [marker_corners_list[i] for i in ordered_indices]
             
-        (tl, tr, br, bl) = ordered_centers
+        # Extract the outermost point from each ordered marker
+        tl_corners = ordered_corners_list[0]
+        tr_corners = ordered_corners_list[1]
+        br_corners = ordered_corners_list[2]
+        bl_corners = ordered_corners_list[3]
+
+        # Use bounding box math to find extreme points regardless of marker rotation
+        out_tl = tl_corners[np.argmin(tl_corners[:, 0] + tl_corners[:, 1])]
+        out_tr = tr_corners[np.argmax(tr_corners[:, 0] - tr_corners[:, 1])]
+        out_br = br_corners[np.argmax(br_corners[:, 0] + br_corners[:, 1])]
+        out_bl = bl_corners[np.argmin(bl_corners[:, 0] - bl_corners[:, 1])]
+
+        ordered_outer_corners = np.array([out_tl, out_tr, out_br, out_bl], dtype="float32")
+            
+        (tl, tr, br, bl) = ordered_outer_corners
 
         width_top = np.sqrt(((tr[0] - tl[0]) ** 2) + ((tr[1] - tl[1]) ** 2))
         width_bottom = np.sqrt(((br[0] - bl[0]) ** 2) + ((br[1] - bl[1]) ** 2))
@@ -88,11 +106,11 @@ def process_image(image, detector, args):
             [0, out_height - 1]
         ], dtype="float32")
 
-        H, status = cv2.findHomography(ordered_centers, dst_points)
+        H, status = cv2.findHomography(ordered_outer_corners, dst_points)
         warped = cv2.warpPerspective(image, H, (out_width, out_height))
 
         cv2.aruco.drawDetectedMarkers(annotated, corners, ids)
-        for pt in ordered_centers:
+        for pt in ordered_outer_corners: # Highlight the outer corners being used
             cv2.circle(annotated, (int(pt[0]), int(pt[1])), 10, (0, 255, 0), -1)
 
         return warped, annotated, True
