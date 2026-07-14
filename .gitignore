@@ -1,6 +1,7 @@
 # Custom
-test*.jpg
-test*.png
+test*og.jpg
+test*og.png
+test1.jpg
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
